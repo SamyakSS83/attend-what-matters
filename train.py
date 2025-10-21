@@ -150,8 +150,8 @@ def train_epoch(model, dataloader, optimizer, device, contrastive_weight=1.0):
 
         # compute repulsive contrastive loss directly on ROI embeddings (exclude full-breast anchor)
         # this encourages distinct embeddings across proposals so only the correct ROI stands out
-        # contrastive_loss = repulsive_contrastive_loss(roi_embeddings, exclude_anchor=True)
-        contrastive_loss = repulsive_contrastive_loss_batch(roi_embeddings)
+        contrastive_loss = repulsive_contrastive_loss(roi_embeddings, exclude_anchor=True)
+        # contrastive_loss = repulsive_contrastive_loss_batch(roi_embeddings)
 
         loss = cls_loss + contrastive_weight * contrastive_loss
         loss.backward()
@@ -232,6 +232,8 @@ def main():
     parser.add_argument('--cudnn_benchmark', action='store_true', help='set torch.backends.cudnn.benchmark = True')
     parser.add_argument('--epochs', type=int, default=100, help='number of training epochs')
     parser.add_argument('--topk', type=int, default=4, help='number of ROIs per image (including full-breast)')
+    parser.add_argument('--pool_mode', choices=['anchor', 'attn', 'avg', 'cls'], default='anchor', help="Pooling mode: 'anchor'=0th ROI, 'attn'=attention pooling, 'avg'=mean over ROIs, 'cls'=learned CLS token")
+    parser.add_argument('--pool_attn_block', type=int, choices=[1,2,3], default=3, help='Transformer block to use for attention pooling when pool_mode=attn')
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -243,7 +245,7 @@ def main():
     # no COCO json required; contrastive loss computed directly on ROI embeddings
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = MMBCDContrast()
+    model = MMBCDContrast(pool_mode=args.pool_mode, pool_attn_block=args.pool_attn_block)
     model = model.to(device)
     if args.freeze_backbone:
         try:

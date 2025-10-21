@@ -15,7 +15,7 @@ from image_preprocessing.process_dicom import convert_to_numpy, convert_16bit_im
 from image_preprocessing.crop import get_cropping_coordinates, crop_image, pad_crop_image
 
 DISJOINT = False
-FOCAL = True
+FOCAL = False
 
 
 class all_mammo():

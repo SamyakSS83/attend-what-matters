@@ -5,6 +5,8 @@ import os
 import torch.nn as nn
 import torch.nn.functional as F
 
+FT = True
+
 # ---------- rotary (RoPE) helper ----------
 class RotaryEmbeddingSmall:
     """
@@ -115,27 +117,27 @@ class TransformerBlock(nn.Module):
 
 # ---------- Full model (close to your original, but with safe RoPE + safe projection) ----------
 class MMBCDContrast(nn.Module):
-    def __init__(self, embedding_dim=1024, position_dim=256, dropout=0.25):
+    def __init__(self, embedding_dim=1024, position_dim=256, dropout=0.25, pool_mode='anchor', pool_attn_block=3):
         super().__init__()
 
         # load your dinov3/dinov2 line (keep user's local loading attempt)
-        try:
+        # try:
             # Try to load local finetuned model if available
-            local_ckpt = 'checkpointsv2/checkpoint_epoch5.pt'
-            # local_ckpt = 'checkpointsv2_hr/best_checkpoint.pt'
-            # if os.path.exists(local_ckpt):
-            self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-            # self.vision_model = torch.hub.load('./dinov3', 'dinov3_vitl16', source='local', pretrained=False)
-            
+        local_ckpt = 'checkpointsv2/checkpoint_epoch5.pt'
+        # local_ckpt = 'checkpointsv2_hr/best_checkpoint.pt'
+        # if os.path.exists(local_ckpt):
+        self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        # self.vision_model = torch.hub.load('./dinov3', 'dinov3_vitl16', source='local', pretrained=False)
+        if FT:
             state_dict = torch.load(local_ckpt, map_location='cpu')
             # If checkpoint is a dict with 'model' key, use that
             if isinstance(state_dict, dict) and 'model' in state_dict:
                 state_dict = state_dict['model']
                 self.vision_model.load_state_dict(state_dict, strict=False)
             
-        except Exception:
-            # fallback to direct hub if user intended remote
-            self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        # except Exception:
+        #     # fallback to direct hub if user intended remote
+        #     self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
 
         # try to obtain backbone output dim
         vision_out_dim = getattr(self.vision_model, 'embed_dim', None)
@@ -195,6 +197,21 @@ class MMBCDContrast(nn.Module):
         except Exception:
             pass
 
+        # pooling configuration: 'anchor' uses 0th ROI, 'attn' uses attention pooling from a block,
+        # 'avg' uses average pooling over ROIs, 'cls' uses a learnable [CLS] token appended to sequence.
+        assert pool_mode in ('anchor', 'attn', 'avg', 'cls'), "pool_mode must be one of 'anchor','attn','avg','cls'"
+        self.pool_mode = pool_mode
+        # which transformer block's attention to use for attention pooling (1/2/3)
+        self.pool_attn_block = int(pool_attn_block)
+
+        # optional CLS token (appended at the end so original token indexing remains unchanged)
+        if self.pool_mode == 'cls':
+            # learnable CLS token of size embedding_dim
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embedding_dim))
+            nn.init.normal_(self.cls_token, mean=0.0, std=0.02)
+        else:
+            self.cls_token = None
+
     def _extract_vision_embedding(self, vision_out):
         """
         Accept a few possible outputs from self.vision_model:
@@ -229,17 +246,70 @@ class MMBCDContrast(nn.Module):
         pos_proj = self.fc_positions(X_positions)  # (B,S,position_dim)
 
         vision_with_pos = torch.cat((vision_out, pos_proj), dim=2)  # (B,S, concat_dim)
-        if self.need_input_proj:
-            trans_in = self.input_proj(vision_with_pos)
+
+        # If using CLS pooling, append CLS token as last token before input projection
+        appended_cls = False
+        if self.pool_mode == 'cls' and self.cls_token is not None:
+            # expand cls token for batch
+            cls_tok = self.cls_token.expand(B, -1, -1)  # (B,1,embedding_dim)
+            # Note: need to project vision_with_pos first to embedding_dim if required so CLS matches dims
+            if self.need_input_proj:
+                trans_in = self.input_proj(vision_with_pos)
+                # trans_in is (B, S, embedding_dim)
+                trans_in = torch.cat([trans_in, cls_tok], dim=1)  # (B, S+1, embedding_dim)
+            else:
+                # vision_with_pos already in embedding_dim when need_input_proj==False
+                trans_in = torch.cat([vision_with_pos, cls_tok], dim=1)
+            appended_cls = True
         else:
-            trans_in = vision_with_pos  # already matching embedding_dim
+            if self.need_input_proj:
+                trans_in = self.input_proj(vision_with_pos)
+            else:
+                trans_in = vision_with_pos  # already matching embedding_dim
 
         b1 = self.transformer_block1(trans_in)
         b2 = self.transformer_block2(b1)
         b3 = self.transformer_block3(b2)
-        roi_embeddings = b3  # (B, S, D)
 
-        pooled = roi_embeddings[:, 0, :]
+        # if cls was appended, the outputs have shape (B, S+1, D)
+        if appended_cls:
+            # separate cls embedding (last token) and roi embeddings (first S tokens)
+            cls_emb = b3[:, -1, :]
+            roi_embeddings = b3[:, :-1, :]
+        else:
+            roi_embeddings = b3  # (B, S, D)
+
+        # Pooling choice: anchor (0th ROI), attention pooling from specified block, or average pooling
+        if self.pool_mode == 'anchor':
+            pooled = roi_embeddings[:, 0, :]
+        elif self.pool_mode == 'avg':
+            pooled = roi_embeddings.mean(dim=1)
+        elif self.pool_mode == 'attn':
+            # choose block
+            if self.pool_attn_block == 1:
+                attn = self.transformer_block1.last_attn_weights
+            elif self.pool_attn_block == 2:
+                attn = self.transformer_block2.last_attn_weights
+            else:
+                attn = self.transformer_block3.last_attn_weights
+            # attn: (B, L, L) where L == S
+            if attn is None:
+                # fallback to anchor
+                pooled = roi_embeddings[:, 0, :]
+            else:
+                # We want a pooling vector per sample: compute attention weights from anchor (index 0)
+                # attn[:, 0, :] gives weights over tokens for each sample
+                weights = attn[:, 0, :].unsqueeze(-1)  # (B, S, 1)
+                pooled = (weights * roi_embeddings).sum(dim=1)  # (B, D)
+        elif self.pool_mode == 'cls':
+            # use cls_emb if available
+            try:
+                pooled = cls_emb
+            except NameError:
+                pooled = roi_embeddings[:, 0, :]
+        else:
+            pooled = roi_embeddings[:, 0, :]
+
         pooled = self.bn_vision(pooled)
         pooled = self.dropout(pooled)
         pooled = F.relu(self.fc1(pooled))
