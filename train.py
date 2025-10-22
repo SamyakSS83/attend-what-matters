@@ -146,7 +146,7 @@ def train_epoch(model, dataloader, optimizer, device, contrastive_weight=1.0):
         y = y.view(-1)
         # classification loss: logits are raw (not passed through sigmoid),
         # so use the numerically-stable BCE with logits variant.
-        cls_loss = F.binary_cross_entropy_with_logits(logits, y)
+        cls_loss = F.binary_cross_entropy_with_logits(logits, y, pos_weight=torch.tensor(10.0, device=device))
 
         # compute repulsive contrastive loss directly on ROI embeddings (exclude full-breast anchor)
         # this encourages distinct embeddings across proposals so only the correct ROI stands out

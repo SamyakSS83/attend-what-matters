@@ -5,7 +5,7 @@ import os
 import torch.nn as nn
 import torch.nn.functional as F
 
-FT = True
+FT = False
 
 # ---------- rotary (RoPE) helper ----------
 class RotaryEmbeddingSmall:
