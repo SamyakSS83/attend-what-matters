@@ -5,7 +5,6 @@ import os
 import torch.nn as nn
 import torch.nn.functional as F
 
-FT = False
 
 # ---------- rotary (RoPE) helper ----------
 class RotaryEmbeddingSmall:
@@ -51,7 +50,6 @@ class RotaryEmbeddingSmall:
         return (x * cos) + (self.rotate_half(x) * sin)
 
 
-# ---------- single-head attention with RoPE (keeps behaviour close to original) ----------
 class SingleHeadSelfAttentionRoPE(nn.Module):
     def __init__(self, embed_dim, dropout=0.0):
         super().__init__()
@@ -89,7 +87,6 @@ class SingleHeadSelfAttentionRoPE(nn.Module):
         return out
 
 
-# ---------- Transformer block that mirrors your original structure ----------
 class TransformerBlock(nn.Module):
     def __init__(self, embedding_size, dropout=0.25):
         super().__init__()
@@ -115,26 +112,13 @@ class TransformerBlock(nn.Module):
         return self.attention_layer.last_attn_weights
 
 
-# ---------- Full model (close to your original, but with safe RoPE + safe projection) ----------
 class MMBCDContrast(nn.Module):
     def __init__(self, embedding_dim=1024, position_dim=256, dropout=0.25, pool_mode='anchor', pool_attn_block=3):
         super().__init__()
 
-        # load your dinov3/dinov2 line (keep user's local loading attempt)
-        if FT:
-            print("Loading finetuned weights...")
-            # Load the base model architecture first
-            self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-            # Load the finetuned weights
-            state_dict = torch.load('dino_448.pt', map_location='cpu', weights_only=True)
-            # Handle both raw state_dict and wrapped dict with 'model' key
-            if isinstance(state_dict, dict) and 'model' in state_dict:
-                state_dict = state_dict['model']
-            self.vision_model.load_state_dict(state_dict, strict=False)
-            print("Loaded finetuned DINOv2 weights from dino_448.pt")
-        else:
-            self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-            print("Loaded pretrained DINOv2 from hub")
+        
+        self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+        print("Loaded pretrained DINOv2 from hub")
 
         # try to obtain backbone output dim
         vision_out_dim = getattr(self.vision_model, 'embed_dim', None)
@@ -314,20 +298,6 @@ class MMBCDContrast(nn.Module):
         logits = self.fc2(pooled).view(-1)  # (B,)
         return logits, roi_embeddings
 
-    def compute_contrastive_loss(self, roi_embeddings, rewards, temperature=0.1, iou_pos_thresh=0.2):
-        device = roi_embeddings.device
-        B, S, D = roi_embeddings.shape
-        emb_norm = F.normalize(roi_embeddings, dim=2)
-        anchor = emb_norm[:, 0, :].unsqueeze(1)
-        others = emb_norm[:, 1:, :]
-        rewards_others = rewards[:, 1:]
-        cos_sim = torch.sum(anchor * others, dim=2)
-        pos_mask = (rewards_others >= iou_pos_thresh).float()
-        weights = rewards_others * pos_mask
-        if weights.sum() == 0:
-            return torch.tensor(0.0, device=device)
-        loss = (weights * (1.0 - cos_sim)).sum() / (weights.sum() + 1e-8)
-        return loss
 
     def get_attention_maps(self):
         return {

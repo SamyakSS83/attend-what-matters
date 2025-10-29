@@ -14,8 +14,7 @@ import torch
 from image_preprocessing.process_dicom import convert_to_numpy, convert_16bit_image_to_8bit
 from image_preprocessing.crop import get_cropping_coordinates, crop_image, pad_crop_image
 
-DISJOINT = False
-FOCAL = False
+
 
 
 class all_mammo():
@@ -103,7 +102,7 @@ class all_mammo():
     def _get_cache_path(self):
         """Generate unique cache filename based on dataset configuration."""
         # Create hash from config parameters
-        config_str = f"{self.text_base}_{self.topk}_{self.iou_threshold}_{FOCAL}_{DISJOINT}"
+        config_str = f"{self.text_base}_{self.topk}_{self.iou_threshold}"
         config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
         
         # Create cache directory if it doesn't exist
@@ -149,70 +148,19 @@ class all_mammo():
                 boxes = np.loadtxt(proposal_path, dtype=np.float32)
                 proposal_missing = False
 
-            if FOCAL:
-                # FOCAL mode: create disjoint ROIs, then add breast bbox as 0th ROI
-                # ensure we have the image to compute breast bbox/fallbacks
-                image = self.get_image(self.image_path_list[index])
-                breast_bbox = self.get_breast_contour_bbox(image)
-                # if there were no boxes, create_proposals will return empty; handle that
-                disjoint_rois = self.create_proposals(boxes) if boxes.size else np.zeros((0, 5), dtype=np.float32)
-                # Insert breast bbox at position 0, keep topk-1 disjoint ROIs
-                proposals = np.vstack([breast_bbox, disjoint_rois[:self.topk-1]])
-                # pad to topk with breast_bbox if needed
-                if proposals.shape[0] < self.topk:
-                    needed = self.topk - proposals.shape[0]
-                    pad = np.repeat(breast_bbox[np.newaxis, :], needed, axis=0)
-                    proposals = np.vstack([proposals, pad])
-            else:
-                proposals = self.create_proposals(boxes)
-                # pad if not enough proposals
-                if proposals.shape[0] < self.topk:
-                    if proposals.shape[0] > 0:
-                        filler = proposals[0]
-                    else:
-                        image = self.get_image(self.image_path_list[index])
-                        H, W = image.shape
-                        filler = np.array([W/2, H/2, W, H, 0.0], dtype=np.float32)
-                    need = self.topk - proposals.shape[0]
-                    pad = np.repeat(filler[np.newaxis, :], need, axis=0)
-                    proposals = np.vstack([proposals, pad])
-
-            # Debug print for the 10th image (index 10), without double-appending
-            # if index == 187:
-            #     print("Length of boxes for 10th image:", len(boxes))
-            #     print("Proposals for 10th image:")
-            #     print(proposals)
-            #     print("Pairwise IOU matrix (excluding anchor 0 as requested):")
-            #     for i in range(1, len(proposals)):
-            #         for j in range(i + 1, len(proposals)):
-            #             iou = self.calculate_iou(proposals[i], proposals[j])
-            #             print(f"IOU between proposal {i} and {j}: {iou}")
-
-            #     # Save a dummy image with all proposals drawn
-            #     import matplotlib.pyplot as plt
-            #     import matplotlib.patches as patches
-
-            #     # Load the image
-            #     img_path = self.image_path_list[index]
-            #     dicom_image = pydicom.dcmread(os.path.join(self.img_base, img_path))
-            #     pixel_array = convert_to_numpy(dicom_image)
-            #     pixel_array_8bit = convert_16bit_image_to_8bit(pixel_array)
-            #     box_coordinates = get_cropping_coordinates(pixel_array_8bit, padding=15)
-            #     cropped_image_16bit = crop_image(pixel_array, box_coordinates)
-
-            #     fig, ax = plt.subplots(1)
-            #     ax.imshow(cropped_image_16bit, cmap='gray')
-
-            #     for box in proposals:
-            #         cx, cy, w, h, *_ = box
-            #         x = cx - w / 2
-            #         y = cy - h / 2
-            #         rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor='r', facecolor='none')
-            #         ax.add_patch(rect)
-
-            #     plt.axis('off')
-            #     plt.savefig("dummy.png", bbox_inches='tight', pad_inches=0)
-            #     plt.close(fig)
+            
+            proposals = self.create_proposals(boxes)
+            # pad if not enough proposals
+            if proposals.shape[0] < self.topk:
+                if proposals.shape[0] > 0:
+                    filler = proposals[0]
+                else:
+                    image = self.get_image(self.image_path_list[index])
+                    H, W = image.shape
+                    filler = np.array([W/2, H/2, W, H, 0.0], dtype=np.float32)
+                need = self.topk - proposals.shape[0]
+                pad = np.repeat(filler[np.newaxis, :], need, axis=0)
+                proposals = np.vstack([proposals, pad])
 
             all_proposals.append(proposals)
         
@@ -236,64 +184,6 @@ class all_mammo():
             proposals = np.concatenate([proposals, additional_proposals])
         proposals = proposals[:self.topk]
         
-        return proposals
-    
-    def create_disjoint_proposals(self, boxes, iou_thresh):
-        """
-        Create proposals ensuring low pairwise IoU among non-anchor ROIs.
-        Always keep the highest-score box as anchor at index 0 and exclude it
-        from all IoU calculations, as requested.
-        """
-        boxes = np.asarray(boxes, dtype=np.float32)
-        N = len(boxes)
-        if N == 0:
-            return np.zeros((0, 5), dtype=np.float32)
-
-        # Extract scores (last column if available)
-        scores = boxes[:, 4] if boxes.shape[1] >= 5 else np.zeros(N, dtype=np.float32)
-
-        # Sort by score descending and pick the highest as anchor
-        order = np.argsort(scores)[::-1]
-        anchor_idx = int(order[0])
-        selected = [anchor_idx]  # anchor at position 0
-
-        # Greedily pick boxes with IoU <= iou_thresh among already selected NON-ANCHOR boxes
-        for idx in order[1:]:
-            if len(selected) >= self.topk:
-                break
-            cand = boxes[idx]
-            too_close = False
-            for j in selected[1:]:  # ignore anchor for IoU checks
-                if self.calculate_iou(cand, boxes[j]) > iou_thresh:
-                    too_close = True
-                    break
-            if not too_close:
-                selected.append(int(idx))
-
-        # If still not enough, try to add more distinct boxes from remaining order
-        if len(selected) < self.topk:
-            for idx in order[1:]:
-                if len(selected) >= self.topk:
-                    break
-                if int(idx) in selected:
-                    continue
-                cand = boxes[idx]
-                too_close = False
-                for j in selected[1:]:
-                    if self.calculate_iou(cand, boxes[j]) > iou_thresh:
-                        too_close = True
-                        break
-                if not too_close:
-                    selected.append(int(idx))
-
-        # If still short, pad by sampling from already selected non-anchor if possible
-        if len(selected) < self.topk:
-            pool = selected[1:] if len(selected) > 1 else [anchor_idx]
-            need = self.topk - len(selected)
-            extra = np.random.choice(pool, size=need, replace=True)
-            selected.extend([int(x) for x in extra.tolist()])
-
-        proposals = boxes[selected[:self.topk]]
         return proposals
 
     
@@ -473,9 +363,9 @@ class all_mammo():
 
 if __name__ == '__main__':
 
-    DATA_CSV = "/home/samyak/scratch/my_vindr/model_specific_preprocessed_data/mmbcd_csvs/train.csv"
-    DATA_IMG_BASE = "/home/samyak/scratch/my_vindr/images/"
-    DATA_TEXT_BASE = "/home/samyak/scratch/focal_rois/"
+    DATA_CSV = "/home/samyak/scratch/VinDr/model_specific_preprocessed_data/mmbcd_csvs/train.csv"
+    DATA_IMG_BASE = "/home/samyak/scratch/VinDr/images/"
+    DATA_TEXT_BASE = "/home/samyak/scratch/VinDr/focal_rois/"
 
     data = all_mammo(DATA_CSV, DATA_IMG_BASE, DATA_TEXT_BASE, topk = 10, enable_augmentation=True)
 
@@ -486,72 +376,4 @@ if __name__ == '__main__':
     print(X2[0])
 
     print(y)
-    
-    # Visualization for FOCAL mode: show random image with topk disjoint bboxes
-    # if FOCAL:
-    #     import matplotlib.pyplot as plt
-    #     import matplotlib.patches as patches
-    #     import random
-        
-    #     print("\n" + "="*60)
-    #     print("FOCAL MODE VISUALIZATION")
-    #     print("="*60)
-        
-    #     # Pick a random image
-    #     random_idx = 0
-    #     print(f"\nVisualizing image at index: {random_idx}")
-        
-    #     # Get image and proposals
-    #     image_path = data.image_path_list[random_idx]
-    #     image = data.get_image(image_path)
-    #     box_filename = image_path.replace(".dicom", "") + '_preds.txt'
-    #     boxes = np.loadtxt(os.path.join(data.text_base, box_filename))
-    #     if boxes.ndim == 1:
-    #         boxes = boxes[np.newaxis, :]
-        
-    #     # Get breast bbox and disjoint proposals
-    #     breast_bbox = data.get_breast_contour_bbox(image)
-    #     disjoint_rois = data.create_disjoint_proposals(boxes, 0.3)
-    #     all_proposals = np.vstack([breast_bbox, disjoint_rois[:data.topk-1]])
-        
-    #     print(f"Total ROIs: {len(all_proposals)}")
-    #     print(f"0th ROI (breast bbox): cx={breast_bbox[0]:.1f}, cy={breast_bbox[1]:.1f}, w={breast_bbox[2]:.1f}, h={breast_bbox[3]:.1f}")
-    #     print(f"Remaining disjoint ROIs: {len(all_proposals)-1}")
-        
-    #     # Visualize
-    #     fig, ax = plt.subplots(1, 1, figsize=(12, 12))
-    #     ax.imshow(image, cmap='gray')
-        
-    #     # Draw each bbox
-    #     for i, bbox in enumerate(all_proposals):
-    #         cx, cy, w, h, score = bbox
-    #         x1 = cx - w/2
-    #         y1 = cy - h/2
-            
-    #         if i == 0:
-    #             # 0th ROI: breast bbox in red with thick border
-    #             color = 'red'
-    #             linewidth = 3
-    #             label = f'0: Breast (full)'
-    #         else:
-    #             # Other ROIs in green
-    #             color = 'green'
-    #             linewidth = 2
-    #             label = f'{i}: score={score:.3f}'
-            
-    #         rect = patches.Rectangle((x1, y1), w, h, linewidth=linewidth, 
-    #                                  edgecolor=color, facecolor='none', label=label)
-    #         ax.add_patch(rect)
-            
-    #         # Add text label
-    #         ax.text(x1, y1 - 5, label, color=color, fontsize=10, 
-    #                bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
-        
-    #     ax.set_title(f'FOCAL Mode: Image {random_idx} with {len(all_proposals)} ROIs\n(Red=Breast, Green=Disjoint Proposals)')
-    #     ax.axis('off')
-    #     plt.tight_layout()
-    #     plt.savefig('focal_mode_visualization.png', dpi=150, bbox_inches='tight')
-    #     print(f"\nVisualization saved to: focal_mode_visualization.png")
-    #     plt.show()
-
-
+   

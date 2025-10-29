@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import json
 
 from data import all_mammo
-from new_model import MMBCDContrast
+from model import MMBCDContrast
 
 
 def repulsive_contrastive_loss(roi_embeddings, exclude_anchor=True, eps=1e-8):
@@ -212,9 +212,9 @@ def evaluate_epoch(model, dataloader, device, contrastive_weight=1.0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--contrastive_weight', type=float, default=0.4,
+    parser.add_argument('--contrastive_weight', type=float, default=0.3,
                     help='weight for contrastive loss (set lower than cls loss)')
-    parser.add_argument('--lr', type=float, default= 1e-5, help='learning rate for AdamW')
+    parser.add_argument('--lr', type=float, default= 1e-6, help='learning rate for AdamW')
 
     parser.add_argument('--train_csv', required=True)
     parser.add_argument('--train_img_base', required=True)
@@ -231,7 +231,7 @@ def main():
     parser.add_argument('--num_workers', type=int, default=8, help='num workers for dataloaders')
     parser.add_argument('--cudnn_benchmark', action='store_true', help='set torch.backends.cudnn.benchmark = True')
     parser.add_argument('--epochs', type=int, default=100, help='number of training epochs')
-    parser.add_argument('--topk', type=int, default=4, help='number of ROIs per image (including full-breast)')
+    parser.add_argument('--topk', type=int, default=5, help='number of ROIs per image (including full-breast)')
     parser.add_argument('--pool_mode', choices=['anchor', 'attn', 'avg', 'cls'], default='anchor', help="Pooling mode: 'anchor'=0th ROI, 'attn'=attention pooling, 'avg'=mean over ROIs, 'cls'=learned CLS token")
     parser.add_argument('--pool_attn_block', type=int, choices=[1,2,3], default=3, help='Transformer block to use for attention pooling when pool_mode=attn')
     parser.add_argument('--pos_weight', type=float, default=10.0, help='positive class weight for BCE loss')
@@ -248,8 +248,6 @@ def main():
     base_dataset = all_mammo(args.train_csv, args.train_img_base, args.train_text_base, topk=args.topk, enable_augmentation=True, cache_dir='./cache_train')
     dataset = WrappedDataset(base_dataset)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn)
-
-    # no COCO json required; contrastive loss computed directly on ROI embeddings
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = MMBCDContrast(pool_mode=args.pool_mode, pool_attn_block=args.pool_attn_block)
