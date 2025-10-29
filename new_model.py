@@ -121,23 +121,20 @@ class MMBCDContrast(nn.Module):
         super().__init__()
 
         # load your dinov3/dinov2 line (keep user's local loading attempt)
-        # try:
-            # Try to load local finetuned model if available
-        local_ckpt = 'checkpointsv2/checkpoint_epoch5.pt'
-        # local_ckpt = 'checkpointsv2_hr/best_checkpoint.pt'
-        # if os.path.exists(local_ckpt):
-        self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-        # self.vision_model = torch.hub.load('./dinov3', 'dinov3_vitl16', source='local', pretrained=False)
         if FT:
-            state_dict = torch.load(local_ckpt, map_location='cpu')
-            # If checkpoint is a dict with 'model' key, use that
+            print("Loading finetuned weights...")
+            # Load the base model architecture first
+            self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+            # Load the finetuned weights
+            state_dict = torch.load('dino_448.pt', map_location='cpu', weights_only=True)
+            # Handle both raw state_dict and wrapped dict with 'model' key
             if isinstance(state_dict, dict) and 'model' in state_dict:
                 state_dict = state_dict['model']
-                self.vision_model.load_state_dict(state_dict, strict=False)
-            
-        # except Exception:
-        #     # fallback to direct hub if user intended remote
-        #     self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+            self.vision_model.load_state_dict(state_dict, strict=False)
+            print("Loaded finetuned DINOv2 weights from dino_448.pt")
+        else:
+            self.vision_model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+            print("Loaded pretrained DINOv2 from hub")
 
         # try to obtain backbone output dim
         vision_out_dim = getattr(self.vision_model, 'embed_dim', None)

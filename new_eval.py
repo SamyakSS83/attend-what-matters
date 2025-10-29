@@ -209,42 +209,46 @@ def evaluate(model, dataloader, device,  out_dir=None):
             except Exception:
                 metrics['roc_auc'] = None
 
-            # Precision-Recall curve and Average Precision (AUC of PR)
+            # compute best F1 and threshold (from PR curve) and recall/FPR at fixed thresholds
             try:
-                from sklearn.metrics import precision_recall_curve, average_precision_score
+                from sklearn.metrics import precision_recall_curve, average_precision_score, recall_score, confusion_matrix
                 if preds.size and targets.size:
                     precision_vals, recall_vals, pr_thresholds = precision_recall_curve(targets, preds)
-                    avg_prec = float(average_precision_score(targets, preds))
-                    metrics['avg_precision'] = avg_prec
-                    # Save arrays to out_dir if available
-                    if out_dir:
+                    # F1 per point on PR curve (precision and recall arrays are aligned; thresholds length = len(precision)-1)
+                    f1_scores = 2 * (precision_vals * recall_vals) / (precision_vals + recall_vals + 1e-8)
+                    best_idx = int(np.argmax(f1_scores))
+                    best_threshold = float(pr_thresholds[best_idx]) if best_idx < len(pr_thresholds) else 1.0
+                    best_f1 = float(f1_scores[best_idx])
+                    metrics['best_f1'] = best_f1
+                    metrics['best_f1_threshold'] = best_threshold
+
+                    # compute Recall and FPR at fixed thresholds
+                    for thr in (0.1, 0.3, 0.5):
+                        preds_bin = (preds >= thr).astype(int)
+                        # recall
                         try:
-                            np.save(os.path.join(out_dir, 'pr_precision.npy'), precision_vals)
-                            np.save(os.path.join(out_dir, 'pr_recall.npy'), recall_vals)
-                            np.save(os.path.join(out_dir, 'pr_thresholds.npy'), pr_thresholds)
+                            r = float(recall_score(targets, preds_bin))
                         except Exception:
-                            pass
-                    # Plot PR curve
-                    if out_dir:
+                            r = None
+                        # fpr: FP / (FP + TN)
                         try:
-                            import matplotlib.pyplot as plt
-                            plt.figure(figsize=(6, 6))
-                            plt.plot(recall_vals, precision_vals, lw=2, color='b')
-                            plt.xlabel('Recall')
-                            plt.ylabel('Precision')
-                            plt.title(f'Precision-Recall curve (AP={avg_prec:.4f})')
-                            plt.grid(True)
-                            plt.savefig(os.path.join(out_dir, 'pr_curve.png'), dpi=150, bbox_inches='tight')
-                            plt.close()
+                            cm = confusion_matrix(targets, preds_bin)
+                            if cm.size == 4:
+                                tn, fp, fn, tp = cm.ravel()
+                                denom = float(fp + tn)
+                                fpr = float(fp / denom) if denom > 0 else None
+                            else:
+                                fpr = None
                         except Exception:
-                            pass
-                    # Also print average precision to stdout
+                            fpr = None
+                        metrics[f'recall@{thr}'] = r
+                        metrics[f'fpr@{thr}'] = fpr
+                    # print the selected best F1 and threshold
                     try:
-                        print(f"  Average Precision (AP / AUC-PR): {avg_prec}")
+                        print(f"  Best F1: {best_f1:.4f} at threshold {best_threshold:.4f}")
                     except Exception:
                         pass
             except Exception:
-                # sklearn not available -- skip PR curve
                 pass
 
             # Print concise metrics to stdout so user sees them immediately
@@ -322,7 +326,7 @@ def main():
     parser.add_argument('--val_img_base', required=True)
     parser.add_argument('--val_text_base', required=True)
     # parser.add_argument('--val_coco', required=True)
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--out_dir', default='./eval_outputs')
     parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--topk', type=int, default=4, help='Number of proposals per image')

@@ -140,21 +140,42 @@ class all_mammo():
         for index, img_path in enumerate(tqdm(self.image_path_list, total=len(self.image_path_list), desc='generating proposals', position=0, leave=True)):
             box_filename = self.image_path_list[index].replace(".dicom","") + '_preds.txt'
             proposal_path = os.path.join(self.text_base, box_filename)
-            assert os.path.isfile(proposal_path), f"{proposal_path} does not exist"
-            boxes = np.loadtxt(proposal_path, dtype=np.float32)
+            # handle missing prediction files gracefully
+            if not os.path.isfile(proposal_path):
+                print(f"Warning: prediction file not found: {proposal_path}. Using fallback proposals.")
+                boxes = np.zeros((0, 5), dtype=np.float32)
+                proposal_missing = True
+            else:
+                boxes = np.loadtxt(proposal_path, dtype=np.float32)
+                proposal_missing = False
 
             if FOCAL:
                 # FOCAL mode: create disjoint ROIs, then add breast bbox as 0th ROI
+                # ensure we have the image to compute breast bbox/fallbacks
                 image = self.get_image(self.image_path_list[index])
                 breast_bbox = self.get_breast_contour_bbox(image)
-                # disjoint_rois = self.create_disjoint_proposals(boxes,0.5)
-                disjoint_rois = self.create_proposals(boxes)
+                # if there were no boxes, create_proposals will return empty; handle that
+                disjoint_rois = self.create_proposals(boxes) if boxes.size else np.zeros((0, 5), dtype=np.float32)
                 # Insert breast bbox at position 0, keep topk-1 disjoint ROIs
                 proposals = np.vstack([breast_bbox, disjoint_rois[:self.topk-1]])
-            # elif DISJOINT:
-            #     proposals = self.create_disjoint_proposals(boxes, 0.3)
+                # pad to topk with breast_bbox if needed
+                if proposals.shape[0] < self.topk:
+                    needed = self.topk - proposals.shape[0]
+                    pad = np.repeat(breast_bbox[np.newaxis, :], needed, axis=0)
+                    proposals = np.vstack([proposals, pad])
             else:
                 proposals = self.create_proposals(boxes)
+                # pad if not enough proposals
+                if proposals.shape[0] < self.topk:
+                    if proposals.shape[0] > 0:
+                        filler = proposals[0]
+                    else:
+                        image = self.get_image(self.image_path_list[index])
+                        H, W = image.shape
+                        filler = np.array([W/2, H/2, W, H, 0.0], dtype=np.float32)
+                    need = self.topk - proposals.shape[0]
+                    pad = np.repeat(filler[np.newaxis, :], need, axis=0)
+                    proposals = np.vstack([proposals, pad])
 
             # Debug print for the 10th image (index 10), without double-appending
             # if index == 187:

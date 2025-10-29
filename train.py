@@ -130,7 +130,7 @@ def collate_fn(batch):
 # NOTE: COCO json handling removed. Contrastive loss runs directly on ROI embeddings.
 
 
-def train_epoch(model, dataloader, optimizer, device, contrastive_weight=1.0):
+def train_epoch(model, dataloader, optimizer, device, contrastive_weight=1.0, pos_wt=10.0):
     model.train()
     total_loss = 0.0
     for X_images, X_positions, y, image_paths, proposals in tqdm(dataloader):
@@ -146,7 +146,7 @@ def train_epoch(model, dataloader, optimizer, device, contrastive_weight=1.0):
         y = y.view(-1)
         # classification loss: logits are raw (not passed through sigmoid),
         # so use the numerically-stable BCE with logits variant.
-        cls_loss = F.binary_cross_entropy_with_logits(logits, y, pos_weight=torch.tensor(10.0, device=device))
+        cls_loss = F.binary_cross_entropy_with_logits(logits, y, pos_weight=torch.tensor(pos_wt, device=device))
 
         # compute repulsive contrastive loss directly on ROI embeddings (exclude full-breast anchor)
         # this encourages distinct embeddings across proposals so only the correct ROI stands out
@@ -234,8 +234,15 @@ def main():
     parser.add_argument('--topk', type=int, default=4, help='number of ROIs per image (including full-breast)')
     parser.add_argument('--pool_mode', choices=['anchor', 'attn', 'avg', 'cls'], default='anchor', help="Pooling mode: 'anchor'=0th ROI, 'attn'=attention pooling, 'avg'=mean over ROIs, 'cls'=learned CLS token")
     parser.add_argument('--pool_attn_block', type=int, choices=[1,2,3], default=3, help='Transformer block to use for attention pooling when pool_mode=attn')
+    parser.add_argument('--pos_weight', type=float, default=10.0, help='positive class weight for BCE loss')
+    parser.add_argument('--seed', type=int, default=42, help='random seed for reproducibility')
     args = parser.parse_args()
 
+    # set random seed for reproducibility
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     os.makedirs(args.out_dir, exist_ok=True)
 
     base_dataset = all_mammo(args.train_csv, args.train_img_base, args.train_text_base, topk=args.topk, enable_augmentation=True, cache_dir='./cache_train')
@@ -267,12 +274,13 @@ def main():
         val_dataset = WrappedDataset(val_base)
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
 
-    best_val = float('inf')
+    # best_val = float('inf')
+    best_val = -float('inf')
     epochs_no_improve = 0
     for epoch in range(1, n_epochs + 1):
         # train using repulsive contrastive loss over ROI embeddings
         train_loss = train_epoch(model, dataloader, optimizer, device,
-                         contrastive_weight=args.contrastive_weight)
+                         contrastive_weight=args.contrastive_weight, pos_wt=args.pos_weight)
         print(f'Epoch {epoch} train loss: {train_loss:.4f}')
         ckpt = os.path.join(args.out_dir, f'model_epoch_{epoch}.pt')
         torch.save(model.state_dict(), ckpt)
@@ -287,9 +295,20 @@ def main():
             val_loss, metrics = evaluate_epoch(model, val_loader, device,
                                    contrastive_weight=args.contrastive_weight)
             print(f'Epoch {epoch} val loss: {val_loss:.4f} metrics: {metrics}')
+            val_roc = metrics.get('roc_auc')
+
             # early stopping check
-            if val_loss + args.min_delta < best_val:
-                best_val = val_loss
+            # if val_loss + args.min_delta < best_val:
+            #     best_val = val_loss
+            #     epochs_no_improve = 0
+            # else:
+            #     epochs_no_improve += 1
+            #     print(f'No improvement for {epochs_no_improve} epochs')
+            #     if epochs_no_improve >= args.patience:
+            #         print(f'Early stopping after {epoch} epochs')
+            #         break
+            if val_roc + args.min_delta > best_val:
+                best_val = val_roc
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
