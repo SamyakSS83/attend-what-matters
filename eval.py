@@ -14,7 +14,7 @@ import numpy as np
 from tqdm import tqdm
 
 from data import all_mammo
-from new_model import MMBCDContrast
+from model import MMBCDContrast
 
 
 def load_checkpoint(model, ckpt_path, device):
@@ -172,7 +172,7 @@ def evaluate(model, dataloader, device,  out_dir=None):
             # default threshold 0.5
             preds_bin_05 = (preds >= 0.5).astype(int)
             metrics['accuracy'] = float(accuracy_score(targets, preds_bin_05))
-            metrics['f1'] = float(f1_score(targets, preds_bin_05))
+            # metrics['f1'] = float(f1_score(targets, preds_bin_05))
             # precision / recall at 0.5
             metrics['precision_0.5'] = float(precision_score(targets, preds_bin_05, zero_division=0))
             metrics['recall_0.5'] = float(recall_score(targets, preds_bin_05, zero_division=0))
