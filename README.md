@@ -205,5 +205,12 @@ The evaluation script generates:
 - **UMAP Embeddings**: 2D visualization of learned embeddings with k-NN analysis
 - **Summary JSON**: Comprehensive metrics saved in `metrics_summary.json`
 
+Our Best weights are present [here](https://drive.google.com/file/d/1QyZ2KG2C4muGowClLoHpCzX717TdDz18/view?usp=sharing)
+
+You can download using:
+```bash
+gdown https://drive.google.com/file/d/1QyZ2KG2C4muGowClLoHpCzX717TdDz18/view?usp=sharing --fuzzy
+```
+
 ---
 
