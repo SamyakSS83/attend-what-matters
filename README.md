@@ -96,12 +96,8 @@ git apply --check gdino.patch
 # apply the patch
 git apply gdino.patch
 
-# if git apply fails, try the patch command
-# patch -p1 < gdino.patch
+# if git apply fails, manually inspect and apply the patch
 
-# commit the changes
-git add -A
-git commit -m "Apply gdino.patch"
 
 #install gdino
 pip install -e .
