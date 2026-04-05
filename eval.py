@@ -30,7 +30,20 @@ def load_checkpoint(model, ckpt_path, device):
     return model
 
 
-def evaluate(model, dataloader, device,  out_dir=None):
+def evaluate(model, dataloader, device, out_dir=None, fixed_threshold=None):
+    """
+    Evaluate model on a dataloader.
+    
+    Args:
+        model: The model to evaluate
+        dataloader: The data to evaluate on
+        device: Device to run on
+        out_dir: Directory to save outputs
+        fixed_threshold: If provided, use this threshold for metrics instead of computing best F1
+    
+    Returns:
+        metrics dict, best_f1_threshold (or None if fixed_threshold was used)
+    """
     preds = []
     targets = []
     image_paths = []
@@ -209,18 +222,36 @@ def evaluate(model, dataloader, device,  out_dir=None):
             except Exception:
                 metrics['roc_auc'] = None
 
-            # compute best F1 and threshold (from PR curve) and recall/FPR at fixed thresholds
+            # compute best F1 and threshold (from PR curve) only if not using fixed threshold
+            best_threshold_to_return = None
             try:
                 from sklearn.metrics import precision_recall_curve, average_precision_score, recall_score, confusion_matrix
                 if preds.size and targets.size:
-                    precision_vals, recall_vals, pr_thresholds = precision_recall_curve(targets, preds)
-                    # F1 per point on PR curve (precision and recall arrays are aligned; thresholds length = len(precision)-1)
-                    f1_scores = 2 * (precision_vals * recall_vals) / (precision_vals + recall_vals + 1e-8)
-                    best_idx = int(np.argmax(f1_scores))
-                    best_threshold = float(pr_thresholds[best_idx]) if best_idx < len(pr_thresholds) else 1.0
-                    best_f1 = float(f1_scores[best_idx])
-                    metrics['best_f1'] = best_f1
-                    metrics['best_f1_threshold'] = best_threshold
+                    # If fixed_threshold is provided, use it; otherwise compute from data
+                    if fixed_threshold is not None:
+                        best_threshold = fixed_threshold
+                        # Compute F1 at this threshold for reporting
+                        preds_bin = (preds >= best_threshold).astype(int)
+                        precision_vals, recall_vals, pr_thresholds = precision_recall_curve(targets, preds)
+                        f1_scores = 2 * (precision_vals * recall_vals) / (precision_vals + recall_vals + 1e-8)
+                        # Find F1 value at or near this threshold
+                        try:
+                            best_f1 = float(f1_scores[np.argmin(np.abs(pr_thresholds - best_threshold))])
+                        except:
+                            best_f1 = None
+                        metrics['f1_at_threshold'] = best_f1
+                        print(f"  Using fixed threshold {best_threshold:.4f}" + (f" (F1={best_f1:.4f})" if best_f1 else ""))
+                    else:
+                        # Compute best threshold from validation data
+                        precision_vals, recall_vals, pr_thresholds = precision_recall_curve(targets, preds)
+                        f1_scores = 2 * (precision_vals * recall_vals) / (precision_vals + recall_vals + 1e-8)
+                        best_idx = int(np.argmax(f1_scores))
+                        best_threshold = float(pr_thresholds[best_idx]) if best_idx < len(pr_thresholds) else 1.0
+                        best_f1 = float(f1_scores[best_idx])
+                        metrics['best_f1'] = best_f1
+                        metrics['best_f1_threshold'] = best_threshold
+                        best_threshold_to_return = best_threshold
+                        print(f"  Best F1: {best_f1:.4f} at threshold {best_threshold:.4f}")
 
                     # compute Recall and FPR at fixed thresholds
                     for thr in (0.1, 0.3, 0.5):
@@ -243,10 +274,18 @@ def evaluate(model, dataloader, device,  out_dir=None):
                             fpr = None
                         metrics[f'recall@{thr}'] = r
                         metrics[f'fpr@{thr}'] = fpr
-                    # print the selected best F1 and threshold
+                    
+                    # Also compute metrics at best/fixed threshold
+                    preds_bin_best = (preds >= best_threshold).astype(int)
                     try:
-                        print(f"  Best F1: {best_f1:.4f} at threshold {best_threshold:.4f}")
-                    except Exception:
+                        metrics['precision_at_best_threshold'] = float(precision_score(targets, preds_bin_best, zero_division=0))
+                        metrics['recall_at_best_threshold'] = float(recall_score(targets, preds_bin_best, zero_division=0))
+                        cm = confusion_matrix(targets, preds_bin_best)
+                        if cm.size == 4:
+                            tn, fp, fn, tp = cm.ravel()
+                            denom = float(fp + tn)
+                            metrics['fpr_at_best_threshold'] = float(fp / denom) if denom > 0 else None
+                    except:
                         pass
             except Exception:
                 pass
@@ -287,7 +326,7 @@ def evaluate(model, dataloader, device,  out_dir=None):
         except Exception:
             pass
 
-    return metrics
+    return metrics, best_threshold_to_return
 
 
 # worker must be at module level so multiprocessing can pickle it
@@ -310,7 +349,7 @@ def eval_one_worker(args_tuple):
         # coco_gt_w = load_coco_gt(args_dict['val_coco'])
 
         out_sub = os.path.join(args_dict.get('out_dir', './eval_outputs'), os.path.basename(ckpt_path).replace('.pt', ''))
-        met = evaluate(m, val_loader_w, device_w,  out_dir=out_sub)
+        met, _ = evaluate(m, val_loader_w, device_w, out_dir=out_sub)
         return os.path.basename(ckpt_path), met
     except Exception as e:
         import traceback
@@ -325,6 +364,9 @@ def main():
     parser.add_argument('--val_csv', required=True)
     parser.add_argument('--val_img_base', required=True)
     parser.add_argument('--val_text_base', required=True)
+    parser.add_argument('--test_csv', required=False, help='test set csv for final evaluation')
+    parser.add_argument('--test_img_base', required=False, help='test set image base')
+    parser.add_argument('--test_text_base', required=False, help='test set proposals base')
     # parser.add_argument('--val_coco', required=True)
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--out_dir', default='./eval_outputs')
@@ -348,16 +390,37 @@ def main():
     from torch.utils.data import DataLoader
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
 
+    # Load test set if provided
+    test_loader = None
+    if args.test_csv and args.test_img_base and args.test_text_base:
+        test_base = all_mammo(args.test_csv, args.test_img_base, args.test_text_base, topk=args.topk, enable_augmentation=False, cache_dir='./cache_eval_test')
+        test_dataset = WrappedDataset(test_base)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
+
     # coco_gt = load_coco_gt(args.val_coco)
     # if single checkpoint requested
     if args.ckpt:
         model = MMBCDContrast(pool_mode=args.pool_mode, pool_attn_block=args.pool_attn_block)
         load_checkpoint(model, args.ckpt, device)
-        metrics = evaluate(model, val_loader, device,  out_dir=args.out_dir)
-        print(f'Checkpoint {args.ckpt} metrics:', metrics)
+        
+        # Evaluate on validation set to find best threshold
+        print("\n=== Validation Set ===")
+        val_metrics, best_threshold = evaluate(model, val_loader, device, out_dir=os.path.join(args.out_dir, 'val'))
+        print(f'Validation metrics:', val_metrics)
+        
+        # If test set provided, evaluate on test with validation threshold
+        test_metrics = {}
+        if test_loader is not None:
+            print("\n=== Test Set (using val threshold) ===")
+            test_metrics, _ = evaluate(model, test_loader, device, out_dir=os.path.join(args.out_dir, 'test'), fixed_threshold=best_threshold)
+            print(f'Test metrics:', test_metrics)
+        
         # save summary
+        summary = {'val': val_metrics}
+        if test_metrics:
+            summary['test'] = test_metrics
         with open(os.path.join(args.out_dir, 'metrics_summary.json'), 'w') as f:
-            json.dump({os.path.basename(args.ckpt): metrics}, f, indent=2)
+            json.dump(summary, f, indent=2)
         return
 
     # otherwise evaluate all checkpoints in the folder, up to 4 in parallel
@@ -390,6 +453,10 @@ def main():
                '--batch_size', str(args.batch_size),
                '--out_dir', out_sub,
                '--num_workers', str(args.num_workers)]
+        if args.test_csv and args.test_img_base and args.test_text_base:
+            cmd.extend(['--test_csv', args.test_csv,
+                       '--test_img_base', args.test_img_base,
+                       '--test_text_base', args.test_text_base])
         # run and capture output
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True)

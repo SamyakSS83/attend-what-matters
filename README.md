@@ -170,9 +170,12 @@ Evaluate trained models using the `eval.py` script:
 ```bash
 python eval.py \
     --ckpt model_epoch_9.pt \
-    --val_csv csvs/test.csv \
+    --val_csv csvs/val.csv \
     --val_img_base /path/to/dicom/images/ \
-    --val_text_base bounding_boxes/bounding_boxes_test/ \
+    --val_text_base bounding_boxes/bounding_boxes_val/ \
+    --test_csv csvs/test.csv \
+    --test_img_base /path/to/dicom/images/ \
+    --test_text_base bounding_boxes/bounding_boxes_test/ \
     --batch_size 4 \
     --topk 5 \
     --pool_mode anchor \
